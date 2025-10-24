@@ -3,6 +3,7 @@ import os
 import re
 import json
 from urllib.parse import urlparse
+from pathlib import Path
 
 URL = "https://codamos.com.br/"
 
@@ -26,8 +27,12 @@ def download_image(request_ctx, url, dest_path):
     except Exception:
         return False
 
-os.makedirs("data/articles", exist_ok=True)
-os.makedirs("data/images", exist_ok=True)
+base_dir = Path(__file__).parent.resolve()
+articles_dir = base_dir / "data" / "articles"
+images_dir = base_dir / "data" / "images"
+
+articles_dir.mkdir(parents=True, exist_ok=True)
+images_dir.mkdir(parents=True, exist_ok=True)
 
 with sync_playwright() as p:
     browser = p.chromium.launch(channel="chrome", headless=False)
