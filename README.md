@@ -1,4 +1,4 @@
-# automacao_web — resumo rápido
+# automacao_web
 
 Descrição
 - Script `automacao_web.py` usa Playwright para abrir a home do site, clicar em cada artigo, extrair título, texto e imagem de capa, salvar texto, screenshot e imagem em disco e gerar um índice JSON.
@@ -50,5 +50,3 @@ Notas importantes
 - O script clica nos links dos previews (abre na mesma aba ou em nova aba conforme o atributo `target`).
 - Se precisar de logs mais verbosos ou transformar em testes (pytest), posso adaptar.
 
-Contato rápido
-- Este README é um lembrete rápido do que foi feito e como rodar. Ajuste seletores e timeouts conforme necessário.
