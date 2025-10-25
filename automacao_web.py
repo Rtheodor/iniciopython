@@ -5,7 +5,8 @@ import json
 from urllib.parse import urlparse
 from pathlib import Path
 
-URL = "https://codamos.com.br/"
+
+URL = "https://python.org.br/"
 
 def sanitize_filename(s):
     s = (s or "").strip()
@@ -21,6 +22,7 @@ def download_image(request_ctx, url, dest_path):
         resp = request_ctx.get(url, timeout=15000)
         if resp.status != 200:
             return False
+        dest_path = str(dest_path)  # aceitar Path ou str
         with open(dest_path, "wb") as f:
             f.write(resp.body())
         return True
@@ -28,8 +30,12 @@ def download_image(request_ctx, url, dest_path):
         return False
 
 base_dir = Path(__file__).parent.resolve()
-articles_dir = base_dir / "data" / "articles"
-images_dir = base_dir / "data" / "images"
+
+# novo: cria pasta por domínio (ex: data/quatrorodas_abril_com)
+domain = urlparse(URL).netloc.replace(":", "_").replace(".", "_")
+data_root = base_dir / "data" / domain
+articles_dir = data_root / "articles"
+images_dir = data_root / "images"
 
 articles_dir.mkdir(parents=True, exist_ok=True)
 images_dir.mkdir(parents=True, exist_ok=True)
@@ -39,8 +45,87 @@ with sync_playwright() as p:
     context = browser.new_context()
     page = context.new_page()
 
-    page.goto(URL, wait_until="networkidle")
+    # aumentar timeouts padrão para navegação e ações
+    context.set_default_navigation_timeout(60000)   # 60s
+    page.set_default_timeout(60000)
+
+    # tentar abrir a página com fallback em caso de timeout
+    try:
+        page.goto(URL, wait_until="networkidle", timeout=60000)
+    except TimeoutError:
+        print("Aviso: timeout ao carregar com networkidle — tentando domcontentloaded...")
+        try:
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        except TimeoutError:
+            print("Erro: não foi possível carregar a página após tentativas. Salvando diagnóstico...")
+            try:
+                # salva screenshot e HTML para inspeção
+                (data_root).mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(data_root / "error_screenshot.png"))
+                html = page.content()
+                (data_root / "error_page.html").write_text(html, encoding="utf-8")
+                print("Diagnóstico salvo em:", data_root)
+            except Exception as e:
+                print("Falha ao salvar diagnóstico:", e)
+            raise
+
     page.wait_for_timeout(1500)
+
+    # Fechar banner de cookies se presente (Diolinux usa .cc-btn.cc-dismiss)
+    try:
+        cookie = page.locator(".cc-btn.cc-dismiss")
+        if cookie.count() and cookie.first.is_visible():
+            cookie.first.click(timeout=3000)
+            page.wait_for_timeout(800)
+            print("Banner de cookies dispensado.")
+    except Exception:
+        # fallback: remover via JS se o click não funcionar
+        try:
+            page.evaluate("document.querySelectorAll('.cc-window, .cc-banner, .cookieconsent').forEach(e => e.remove())")
+            page.wait_for_timeout(300)
+            print("Banner de cookies removido via JS.")
+        except Exception:
+            pass
+
+    # --- diagnóstico: imprimir contagens de seletores e tentar scroll se necessário ---
+    candidate_selectors = [
+        "article", ".post", ".card", ".blog-item", ".entry",
+        ".td-block-row .td-module-container", ".td_module_wrap", ".post-listing .post",
+        ".post-item", ".blog-list .item", ".content .post"
+    ]
+
+    print(">> Diagnosticando seletores na home:", URL)
+    any_found = False
+    for sel in candidate_selectors:
+        try:
+            n = page.locator(sel).count()
+        except Exception:
+            n = 0
+        print(f"  {sel} -> {n}")
+        if n:
+            any_found = True
+
+    # Se nada encontrado, tenta scroll/pause (lazy load) e reconta
+    if not any_found:
+        print("  Nenhum preview encontrado — rolando a página e aguardando conteúdo dinâmico...")
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
+        for sel in candidate_selectors:
+            try:
+                n = page.locator(sel).count()
+            except Exception:
+                n = 0
+            print(f"  after-scroll {sel} -> {n}")
+
+    # Se ainda nada, imprime um trecho do HTML para inspecionar manualmente
+    if not any_found:
+        try:
+            snippet = page.locator("body").first.inner_html(timeout=2000)[:2000]
+            print("  Trecho do HTML da página (primeiros 2000 chars):")
+            print(snippet)
+        except Exception as e:
+            print("  Não foi possível obter HTML:", e)
+    # --- fim diagnóstico ---
 
     articles_summary = []
 
@@ -109,10 +194,8 @@ with sync_playwright() as p:
             title = f"artigo_{index}"
 
         safe_name = sanitize_filename(title) or f"artigo_{index}"
-        article_dir = os.path.join("data", "articles", safe_name)
-        os.makedirs(article_dir, exist_ok=True)
 
-        # Extrair conteúdo (texto)
+        # --- NOVO: extrair conteúdo (texto) ---
         content = ""
         try:
             for s in ["article .entry-content", ".entry-content", ".post-content", ".content", "#content", "article"]:
@@ -127,8 +210,9 @@ with sync_playwright() as p:
                 content = article_page.locator("body").inner_text().strip()
         except Exception:
             content = ""
+        # --- fim extração de conteúdo ---
 
-        # Extrair imagem de capa
+        # --- NOVO: extrair imagem de capa ---
         img_url = None
         try:
             for s in ["article img", ".post-thumbnail img", ".featured img", "img.wp-post-image", ".entry-image img", "img"]:
@@ -142,36 +226,41 @@ with sync_playwright() as p:
                     continue
         except Exception:
             img_url = None
+        # --- fim extração de imagem ---
+
+        # usar pathlib para salvar dentro de data/<domínio>/articles
+        article_dir = articles_dir / safe_name
+        article_dir.mkdir(parents=True, exist_ok=True)
 
         # Salvar texto
-        texto_path = os.path.join(article_dir, "texto.txt")
+        texto_path = article_dir / "texto.txt"
         with open(texto_path, "w", encoding="utf-8") as f:
             f.write(title + "\n\n")
             f.write(content)
 
         # Salvar screenshot
-        screenshot_path = os.path.join(article_dir, "screenshot.png")
+        screenshot_path = article_dir / "screenshot.png"
         try:
-            article_page.screenshot(path=screenshot_path, full_page=True)
+            article_page.screenshot(path=str(screenshot_path), full_page=True)
         except Exception:
             pass
 
-        # Baixar imagem
+        # Baixar imagem (salvar em data/<domínio>/images)
         saved_image = None
         if img_url:
             parsed = urlparse(img_url)
             ext = os.path.splitext(parsed.path)[1] or ".jpg"
             image_filename = f"{safe_name}{ext}"
-            image_path = os.path.join("data", "images", image_filename)
+            image_path = images_dir / image_filename
             ok = download_image(context.request, img_url, image_path)
             if ok:
-                saved_image = image_path
+                saved_image = str(image_path)
 
         articles_summary.append({
             "title": title,
-            "dir": article_dir,
-            "texto": texto_path,
-            "screenshot": screenshot_path if os.path.exists(screenshot_path) else None,
+            "dir": str(article_dir),
+            "texto": str(texto_path),
+            "screenshot": str(screenshot_path) if screenshot_path.exists() else None,
             "image_saved": saved_image,
         })
 
@@ -191,7 +280,7 @@ with sync_playwright() as p:
         page.wait_for_timeout(600)
 
     # Salvar índice
-    with open(os.path.join("data", "articles_index.json"), "w", encoding="utf-8") as jf:
+    with open(data_root / "articles_index.json", "w", encoding="utf-8") as jf:
         json.dump(articles_summary, jf, ensure_ascii=False, indent=2)
 
     context.close()
